@@ -11,3 +11,10 @@ var/
 .vs/
 **.DS_Store
 *.pyc
+
+# Local profiling datasets, generated indexes and reports
+experiments/profiling/data
+experiments/profiling/indexes/
+experiments/profiling/results/
+experiments/profiling/observations/
+__pycache__/

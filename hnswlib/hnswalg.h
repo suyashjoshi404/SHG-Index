@@ -2,6 +2,7 @@
 
 #include "visited_list_pool.h"
 #include "hnswlib.h"
+#include "search_stats.h"
 #include <atomic>
 #include <random>
 #include <stdlib.h>
@@ -317,7 +318,9 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         const void *data_point,
         size_t ef,
         BaseFilterFunctor* isIdAllowed = nullptr,
-        BaseSearchStopCondition<dist_t>* stop_condition = nullptr) const {
+        BaseSearchStopCondition<dist_t>* stop_condition = nullptr,
+        HNSWStats* stats = nullptr) const {
+        if (stats) stats->ensure_levels(1);
         VisitedList *vl = visited_list_pool_->getFreeVisitedList();
         vl_type *visited_array = vl->mass;
         vl_type visited_array_tag = vl->curV;
@@ -330,6 +333,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
             (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
             char* ep_data = getDataByInternalId(ep_id);
             dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+            if (stats) stats->add_distance(0, false, true);
             lowerBound = dist;
             top_candidates.emplace(dist, ep_id);
             if (!bare_bone_search && stop_condition) {
@@ -361,6 +365,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 break;
             }
             candidate_set.pop();
+            if (stats) stats->add_hop(0);
 
             tableint current_node_id = current_node_pair.second;
             int *data = (int *) get_linklist0(current_node_id);
@@ -391,6 +396,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
                     char *currObj1 = (getDataByInternalId(candidate_id));
                     dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    if (stats) stats->add_distance(0);
 
                     bool flag_consider_candidate;
                     if (!bare_bone_search && stop_condition) {
@@ -688,6 +694,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
 
     void saveIndex(const std::string &location) {
         std::ofstream output(location, std::ios::binary);
+        if (!output) throw std::runtime_error("Cannot write HNSW index: " + location);
         std::streampos position;
 
         writeBinaryPOD(output, offsetLevel0_);
@@ -714,6 +721,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 output.write(linkLists_[i], linkListSize);
         }
         output.close();
+        if (!output) throw std::runtime_error("Failed writing HNSW index: " + location);
     }
 
 
@@ -1289,13 +1297,22 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
     }
 
 
+    // Keep the AlgorithmInterface override and existing callers unchanged.
     std::priority_queue<std::pair<dist_t, labeltype >>
-    searchKnn(const void *query_data, tableint query_Id,  size_t k, BaseFilterFunctor* isIdAllowed = nullptr) const {
+    searchKnn(const void *query_data, tableint query_Id, size_t k,
+              BaseFilterFunctor* isIdAllowed = nullptr) const override {
+        return searchKnn(query_data, query_Id, k, isIdAllowed, nullptr);
+    }
+
+    std::priority_queue<std::pair<dist_t, labeltype >>
+    searchKnn(const void *query_data, tableint query_Id,  size_t k, BaseFilterFunctor* isIdAllowed, HNSWStats* stats) const {
         std::priority_queue<std::pair<dist_t, labeltype >> result;
         if (cur_element_count == 0) return result;
+        if (stats) stats->ensure_levels(maxlevel_ + 1);
 
         tableint currObj = enterpoint_node_;
         dist_t curdist = fstdistfunc_(query_data, getDataByInternalId(enterpoint_node_), dist_func_param_);
+        if (stats) stats->add_distance(maxlevel_, false, true);
 
         for (int level = maxlevel_; level > 0; level--) {
             bool changed = true;
@@ -1306,6 +1323,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                 data = (unsigned int *) get_linklist(currObj, level);
                 int size = getListCount(data);
                 metric_hops++;
+                if (stats) stats->add_hop(level);
                 metric_distance_computations+=size;
 
                 tableint *datal = (tableint *) (data + 1);
@@ -1314,6 +1332,7 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
                     if (cand < 0 || cand > max_elements_)
                         throw std::runtime_error("cand error");
                     dist_t d = fstdistfunc_(query_data, getDataByInternalId(cand), dist_func_param_);
+                    if (stats) stats->add_distance(level);
 
                     if (d < curdist) {
                         curdist = d;
@@ -1328,10 +1347,10 @@ class HierarchicalNSW : public AlgorithmInterface<dist_t> {
         bool bare_bone_search = !num_deleted_ && !isIdAllowed;
         if (bare_bone_search) {
             top_candidates = searchBaseLayerST<true>(
-                    currObj, query_data, std::max(ef_, k), isIdAllowed);
+                    currObj, query_data, std::max(ef_, k), isIdAllowed, nullptr, stats);
         } else {
             top_candidates = searchBaseLayerST<false>(
-                    currObj, query_data, std::max(ef_, k), isIdAllowed);
+                    currObj, query_data, std::max(ef_, k), isIdAllowed, nullptr, stats);
         }
 
         while (top_candidates.size() > k) {

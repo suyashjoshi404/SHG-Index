@@ -1,6 +1,6 @@
 # C++ examples
 
-Creating index, inserting elements, searching and serialization
+Create an index, insert and search vectors, then save and reload the index:
 ```cpp
 #include "../../hnswlib/hnswlib.h"
 
@@ -62,7 +62,7 @@ int main() {
 }
 ```
 
-An example of filtering with a boolean function during the search:
+Filter search results with a boolean predicate:
 ```cpp
 #include "../../hnswlib/hnswlib.h"
 
@@ -123,7 +123,7 @@ int main() {
 }
 ```
 
-An example with reusing the memory of the deleted elements when new elements are being added (via `allow_replace_deleted` flag):
+Reuse deleted-element slots when adding new elements by enabling `allow_replace_deleted`:
 ```cpp
 #include "../../hnswlib/hnswlib.h"
 

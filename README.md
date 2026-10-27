@@ -1,8 +1,8 @@
-# The Source Code for Shortcut-enabled Hierarchical Graph (SHG) index 
+# Shortcut-enabled Hierarchical Graph (SHG) index
 
 ## Introduction
 
-This is the source code for the SHG Index. The code is developed based on the HNSW Library (https://github.com/nmslib/hnswlib). */pgm* is the learned index for the shortcut. *heds.h* contains the implementation details of our method.
+This repository implements the SHG index on top of [hnswlib](https://github.com/nmslib/hnswlib). `pgm` is the learned index used for shortcuts; `hnswlib/heds.h` implements SHG.
 
 ## Compilation 
 
@@ -10,20 +10,26 @@ This is the source code for the SHG Index. The code is developed based on the HN
 mkdir build
 cd build
 cmake ..
-make 
+make
 ```
 
 ## Usage 
-*./example_search {algName} {dataset} {k}*
+`./example_search {algName} {dataset} {k}`
 
 ```bash
 ./example_search heds enron 20
 ```
-Conduct the 20-ANN Search on the dataset Enron. Please unzip the data in */enron* before using it.
+This runs a 20-nearest-neighbor search on Enron. Unzip the dataset into `enron/` first.
 
 ## Dataset
-In our project, the format of the input file (such as enron.data_new, which is in float data type) is the same as that in existing works. It is a binary file, which is organized as the following format:
+Input data such as `enron.data_new` use this binary layout:
 ```
 {Bytes of the data type (int)} {The size of the vectors (int)} {The dimension of the vectors (int)} {All of the binary vector, arranged in turn (float)}
 ```
-For your application, you should also transform your dataset into this binary format, then rename it as [datasetName].data_new and replace the PATH
+Convert other datasets to this format, name the file `[datasetName].data_new`, and update the data path.
+
+## Native HNSW/SHG profiling
+
+For reproducible SIFT1M and Enron build/search measurements, query-local
+per-layer hops and distance statistics, recall and CSV reports, see
+[experiments/profiling/README.md](experiments/profiling/README.md).

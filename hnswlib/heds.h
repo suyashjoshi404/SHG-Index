@@ -3,6 +3,7 @@
 #include "visited_list_pool.h"
 #include "hnswlib.h"
 #include "basis.h"
+#include "search_stats.h"
 #include <atomic>
 #include <random>
 #include <stdlib.h>
@@ -21,7 +22,6 @@
 namespace hnswlib {
 typedef unsigned int tableint;
 typedef unsigned int linklistsizeint;
-
 
 template<typename dist_t, size_t Epsilon=64>
 class HEDS : public AlgorithmInterface<dist_t> {
@@ -84,9 +84,9 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
     //static int epsilon = 8;
     pgm::DynamicPGMIndex<dist_t, int> Shortcuts;
-    int shortcutsSize;
+    int shortcutsSize = 0;
     std::vector<dist_t> denseDensity;
-    dist_t dis_bound;
+    dist_t dis_bound = 0;
 
     std::vector<dist_t> resultsProcessing;
 
@@ -442,7 +442,8 @@ class HEDS : public AlgorithmInterface<dist_t> {
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> density_skipLevels;
         
         std::vector<int> levelCounts(maxlevel_+1, 0);
-        for(int l:element_levels_){
+        for(int i = 0; i < num_base; ++i){
+            int l = element_levels_[i];
             int l_ = l;
             while(l_ >=0 ){
                 levelCounts[l_] ++;
@@ -497,7 +498,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
             denseDensity.push_back(-density_skipLevels.top().first);
             density_skipLevels.pop();
         }
-        dis_bound = denseDensity[denseDensity.size()-1];
+        if (!denseDensity.empty()) dis_bound = denseDensity.back();
         shortcutsSize = Shortcuts.size(); 
    
     }
@@ -524,17 +525,26 @@ class HEDS : public AlgorithmInterface<dist_t> {
     }
 
     std::priority_queue<std::pair<dist_t, labeltype >>
-    searchKnnShortcuts(Query &query, BaseFilterFunctor* isIdAllowed = nullptr) {
+    searchKnnShortcuts(Query &query, BaseFilterFunctor* isIdAllowed = nullptr,
+                       SHGSearchStats* stats = nullptr) {
         std::priority_queue<std::pair<dist_t, labeltype >> result;
 
         if (cur_element_count == 0) return result;
+        if (stats) stats->ensure_levels(maxlevel_ + 1);
+        std::vector<size_t> touched_results;
+        const auto remember_distance = [&](tableint node, int level, dist_t distance) {
+            const size_t slot = static_cast<size_t>(node) * (maxlevel_ + 1) + level;
+            if (resultsProcessing[slot] == -1) touched_results.push_back(slot);
+            resultsProcessing[slot] = distance;
+        };
 
         tableint currObj = enterpoint_node_;
 
 
         for(int level = maxlevel_; level > 0;){
             dist_t curdist = getDisByLevel(query.query_Id, currObj, level);
-            resultsProcessing[currObj * (maxlevel_+1) + level] = curdist;
+            if (stats) stats->add_distance(level, true, true);
+            remember_distance(currObj, level, curdist);
 
 
             bool changed = true;
@@ -542,6 +552,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
                 changed = false;
                 unsigned int *data;
 
+                if (stats) stats->add_hop(level);
                 data = (unsigned int *) get_linklist(currObj, level);
                 int size = getListCount(data);
 
@@ -555,12 +566,14 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
                     if(pruneDisCompute(curdist, level, query.query_Id, cand, resultsProcessing)){
                         purneNumDis ++;
+                        if (stats) stats->layers[level].pruned_neighbors++;
                         continue;
                     }
 
 
                     dist_t d = getDisByLevel(query.query_Id, cand, level);
-                    resultsProcessing[cand * (maxlevel_+1) + level] = d;
+                    if (stats) stats->add_distance(level, true);
+                    remember_distance(cand, level, d);
 
                     if (d < curdist) {
                         curdist = d;
@@ -573,6 +586,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
             if(shortcutsSize < 100){
                 level --;
             }else{
+                const int previous_level = level;
                 int skip_to_level = level - levelsSkip(curdist);
                 //int skip_to_level = level - levelsSkip(getDisByLevel(query.query_Id, currObj, 0));
                 if(skip_to_level == level - 1){
@@ -581,6 +595,8 @@ class HEDS : public AlgorithmInterface<dist_t> {
                     level = (skip_to_level > 0) ? skip_to_level:0; 
                 }
                 if(skip_to_level == level) {level --;} 
+                if (stats && level < previous_level - 1)
+                    stats->layers[previous_level].levels_skipped += previous_level - level - 1;
             }
         }
 
@@ -592,12 +608,12 @@ class HEDS : public AlgorithmInterface<dist_t> {
         bool bare_bone_search = !num_deleted_ && !isIdAllowed;
         if (bare_bone_search) {
             top_candidates = searchBaseLayerSTPrune<true>(
-                    currObj, query.query_Id, getDataByInternalId(query.query_Id), (size_t)(query.k*1), resultsProcessing, isIdAllowed);
+                    currObj, query.query_Id, getDataByInternalId(query.query_Id), std::max(ef_, (size_t)query.k), resultsProcessing, isIdAllowed, nullptr, stats);
             //top_candidates = searchBaseLayerST<true>(
             //        currObj, getDataByInternalId(query.query_Id), (size_t)(query.k*1), isIdAllowed);
         } else {
             top_candidates = searchBaseLayerSTPrune<false>(
-                    currObj, query.query_Id, getDataByInternalId(query.query_Id), (size_t)(query.k*1), resultsProcessing, isIdAllowed);
+                    currObj, query.query_Id, getDataByInternalId(query.query_Id), std::max(ef_, (size_t)query.k), resultsProcessing, isIdAllowed, nullptr, stats);
             //top_candidates = searchBaseLayerST<false>(
             //        currObj, getDataByInternalId(query.query_Id), (size_t)(query.k*1), isIdAllowed);
         }
@@ -610,6 +626,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
             result.push(std::pair<dist_t, labeltype>(rez.first, getExternalLabel(rez.second)));
             top_candidates.pop();
         }
+        for (size_t slot : touched_results) resultsProcessing[slot] = -1;
         return result;
         
 
@@ -720,7 +737,9 @@ class HEDS : public AlgorithmInterface<dist_t> {
         const void *data_point,
         size_t ef,
         BaseFilterFunctor* isIdAllowed = nullptr,
-        BaseSearchStopCondition<dist_t>* stop_condition = nullptr) const {
+        BaseSearchStopCondition<dist_t>* stop_condition = nullptr,
+        HNSWStats* stats = nullptr) const {
+        if (stats) stats->ensure_levels(1);
         VisitedList *vl = visited_list_pool_->getFreeVisitedList();
         vl_type *visited_array = vl->mass;
         vl_type visited_array_tag = vl->curV;
@@ -736,6 +755,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
             (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
             char* ep_data = getDataByInternalId(ep_id);
             dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+            if (stats) stats->add_distance(0, false, true);
             baseNumDis++;
             baseNumScan+=data_dim_;
 
@@ -770,6 +790,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
                 break;
             }
             candidate_set.pop();
+            if (stats) stats->add_hop(0);
 
             tableint current_node_id = current_node_pair.second;
             int *data = (int *) get_linklist0(current_node_id);
@@ -791,6 +812,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
                     char *currObj1 = (getDataByInternalId(candidate_id));
                     dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    if (stats) stats->add_distance(0);
                     baseNumDis++;
                     baseNumScan+=data_dim_;
 
@@ -851,7 +873,9 @@ class HEDS : public AlgorithmInterface<dist_t> {
         size_t ef,
         std::vector<dist_t>& resultsProcessing,
         BaseFilterFunctor* isIdAllowed = nullptr,
-        BaseSearchStopCondition<dist_t>* stop_condition = nullptr) const {
+        BaseSearchStopCondition<dist_t>* stop_condition = nullptr,
+        SHGSearchStats* stats = nullptr) const {
+        if (stats) stats->ensure_levels(1);
         VisitedList *vl = visited_list_pool_->getFreeVisitedList();
         vl_type *visited_array = vl->mass;
         vl_type visited_array_tag = vl->curV;
@@ -871,6 +895,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
             (!isMarkedDeleted(ep_id) && ((!isIdAllowed) || (*isIdAllowed)(getExternalLabel(ep_id))))) {
             char* ep_data = getDataByInternalId(ep_id);
             dist_t dist = fstdistfunc_(data_point, ep_data, dist_func_param_);
+            if (stats) stats->add_distance(0, false, true);
             //resultsProcessing[ep_id] = std::make_pair(0, dist);
             baseNumDis++;
             baseNumScan+=data_dim_;
@@ -910,6 +935,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
             candidate_set.pop();
 
             tableint current_node_id = current_node_pair.second;
+            if (stats) stats->add_hop(0);
             int *data = (int *) get_linklist0(current_node_id);
             size_t size = getListCount((linklistsizeint*)data);
             
@@ -928,15 +954,18 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
                 if(pruneDisCompute(lowerBound, 0, queryID, candidate_id, resultsProcessing)){
                     purneBaseNumDis ++;
+                    if (stats) stats->layers[0].pruned_neighbors++;
                     continue;
                 }
 
                 if(hops > 20 && top_candidates.size() >= ef){
                     //dist_t approDis = getDisByLevel(queryID, candidate_id, maxFixLevel_);
                     dist_t approDis = getDisByCompressedVector(queryID, candidate_id, 2);
+                    if (stats) stats->add_distance(0, true);
                     dist_t inferDis = approDis * pow(k_, 3);
                     if(inferDis > lowerBound){
                         purneBaseNumDis++;
+                        if (stats) stats->layers[0].pruned_neighbors++;
                         break;                          
                     }
                 }
@@ -946,6 +975,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
                     char *currObj1 = (getDataByInternalId(candidate_id));
                     dist_t dist = fstdistfunc_(data_point, currObj1, dist_func_param_);
+                    if (stats) stats->add_distance(0);
                     baseNumDis++;
                     baseNumScan+=data_dim_;
 
@@ -1223,6 +1253,12 @@ class HEDS : public AlgorithmInterface<dist_t> {
             throw std::runtime_error("Not enough memory: resizeIndex failed to allocate other layers");
         linkLists_ = linkLists_new;
 
+        if (data_rep_memory_ && data_rep_size_) {
+            char* representations = static_cast<char*>(realloc(
+                data_rep_memory_, new_max_elements * data_rep_size_ * sizeof(float)));
+            if (!representations) throw std::runtime_error("Cannot resize SHG representations");
+            data_rep_memory_ = representations;
+        }
         max_elements_ = new_max_elements;
     }
 
@@ -1286,6 +1322,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
     void saveIndex(const std::string &location) {
         std::ofstream output(location, std::ios::binary);
+        if (!output) throw std::runtime_error("Cannot write SHG index: " + location);
         std::streampos position;
 
         writeBinaryPOD(output, offsetLevel0_);
@@ -1312,6 +1349,71 @@ class HEDS : public AlgorithmInterface<dist_t> {
                 output.write(linkLists_[i], linkListSize);
         }
         output.close();
+        if (!output) throw std::runtime_error("Failed writing SHG index: " + location);
+    }
+
+    // The upstream graph format omits the representations and shortcut map
+    // required by searchKnnShortcuts. Keep them in a companion file.
+    void saveSearchState(const std::string &location) const {
+        std::ofstream output(location, std::ios::binary);
+        if (!output) throw std::runtime_error("Cannot write SHG search state: " + location);
+        const uint64_t magic = 0x3145544154534748ULL; // HGSTATE1
+        const uint64_t count = cur_element_count;
+        const uint64_t dimension = data_dim_;
+        const uint64_t rep_size = data_rep_size_;
+        const uint64_t shortcut_count = Shortcuts.size();
+        writeBinaryPOD(output, magic);
+        writeBinaryPOD(output, count);
+        writeBinaryPOD(output, dimension);
+        writeBinaryPOD(output, rep_size);
+        writeBinaryPOD(output, shortcut_count);
+        output.write(data_rep_memory_, count * rep_size * sizeof(float));
+        for (const auto& entry : Shortcuts) {
+            writeBinaryPOD(output, entry.first);
+            writeBinaryPOD(output, entry.second);
+        }
+        if (!output) throw std::runtime_error("Failed writing SHG search state: " + location);
+    }
+
+    void loadSearchState(const std::string &location, size_t dimension) {
+        if (data_rep_memory_ || Shortcuts.size())
+            throw std::runtime_error("Load SHG search state into a freshly loaded graph");
+        std::ifstream input(location, std::ios::binary);
+        if (!input) throw std::runtime_error("Cannot open SHG search state: " + location);
+        uint64_t magic, count, saved_dimension, rep_size, shortcut_count;
+        readBinaryPOD(input, magic);
+        readBinaryPOD(input, count);
+        readBinaryPOD(input, saved_dimension);
+        readBinaryPOD(input, rep_size);
+        readBinaryPOD(input, shortcut_count);
+        if (!input || magic != 0x3145544154534748ULL || count != cur_element_count ||
+            saved_dimension != dimension || shortcut_count > count * 64)
+            throw std::runtime_error("Invalid or mismatched SHG search state: " + location);
+        data_dim_ = dimension;
+        data_rep_size_ = 0;
+        maxFixLevel_ = 0;
+        size_t reduced = dimension;
+        while (reduced / k_ >= k_) {
+            ++maxFixLevel_;
+            reduced = static_cast<size_t>(std::ceil(float(reduced) / float(k_)));
+            data_rep_size_ += reduced;
+        }
+        if (rep_size != data_rep_size_)
+            throw std::runtime_error("SHG representation size does not match index dimension");
+        data_rep_memory_ = static_cast<char*>(malloc(max_elements_ * rep_size * sizeof(float)));
+        if (!data_rep_memory_) throw std::runtime_error("Cannot allocate SHG representations");
+        input.read(data_rep_memory_, count * rep_size * sizeof(float));
+        for (uint64_t i = 0; i < shortcut_count; ++i) {
+            dist_t key;
+            int value;
+            readBinaryPOD(input, key);
+            readBinaryPOD(input, value);
+            if (!input) throw std::runtime_error("Truncated SHG search state: " + location);
+            Shortcuts.insert_or_assign(key, value);
+        }
+        if (!input || input.peek() != std::char_traits<char>::eof())
+            throw std::runtime_error("Invalid SHG search state length: " + location);
+        shortcutsSize = Shortcuts.size();
     }
 
 
@@ -2496,12 +2598,14 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
 
     std::priority_queue<std::pair<dist_t, labeltype >>
-    searchKnnHNSW(Query &query, BaseFilterFunctor* isIdAllowed = nullptr) const {
+    searchKnnHNSW(Query &query, BaseFilterFunctor* isIdAllowed = nullptr, HNSWStats* stats = nullptr) const {
         std::priority_queue<std::pair<dist_t, labeltype >> result;
         if (cur_element_count == 0) return result;
+        if (stats) stats->ensure_levels(maxlevel_ + 1);
 
         tableint currObj = enterpoint_node_;
         dist_t curdist = fstdistfunc_(getDataByInternalId(query.query_Id), getDataByInternalId(enterpoint_node_), dist_func_param_);
+        if (stats) stats->add_distance(maxlevel_, false, true);
 
         for (int level = maxlevel_; level > 0; level--) {
             bool changed = true;
@@ -2512,6 +2616,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
                 data = (unsigned int *) get_linklist(currObj, level);
                 int size = getListCount(data);
                 metric_hops++;
+                if (stats) stats->add_hop(level);
                 metric_distance_computations+=size;
 
                 tableint *datal = (tableint *) (data + 1);
@@ -2520,6 +2625,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
                     if (cand < 0 || cand > max_elements_)
                         throw std::runtime_error("cand error");
                     dist_t d = fstdistfunc_(getDataByInternalId(query.query_Id), getDataByInternalId(cand), dist_func_param_);
+                    if (stats) stats->add_distance(level);
 
                     if (d < curdist) {
                         curdist = d;
@@ -2530,16 +2636,15 @@ class HEDS : public AlgorithmInterface<dist_t> {
             }
         }
 
-        std::cout << "entry point: " << currObj << " current dis: " << curdist << "   " << std::max(ef_, (size_t)query.k) << std::endl;
 
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
         bool bare_bone_search = !num_deleted_ && !isIdAllowed;
         if (bare_bone_search) {
             top_candidates = searchBaseLayerST<true>(
-                    currObj, getDataByInternalId(query.query_Id), std::max(ef_, (size_t)query.k), isIdAllowed);
+                    currObj, getDataByInternalId(query.query_Id), std::max(ef_, (size_t)query.k), isIdAllowed, nullptr, stats);
         } else {
             top_candidates = searchBaseLayerST<false>(
-                    currObj, getDataByInternalId(query.query_Id), std::max(ef_, (size_t)query.k), isIdAllowed);
+                    currObj, getDataByInternalId(query.query_Id), std::max(ef_, (size_t)query.k), isIdAllowed, nullptr, stats);
         }
 
         while (top_candidates.size() > query.k) {
