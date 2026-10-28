@@ -583,7 +583,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
                 }                
             }
             //query.queryRes.push_back(std::make_tuple(currObj, level, curdist));
-            if(shortcutsSize < 100){
+            if(shortcutsSize == 0){
                 level --;
             }else{
                 const int previous_level = level;
@@ -602,7 +602,7 @@ class HEDS : public AlgorithmInterface<dist_t> {
 
         //std::cout << "entry point: " << currObj << " current dis: " << getDisByLevel(query.query_Id, currObj, 0) << "   " << std::max(ef_, (size_t)query.k) << std::endl;
         
-        // Search at the base layer.
+        // Honor efSearch while keeping at least k base-layer candidates.
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>, CompareByFirst> top_candidates;
 
         bool bare_bone_search = !num_deleted_ && !isIdAllowed;

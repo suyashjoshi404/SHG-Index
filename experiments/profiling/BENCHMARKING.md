@@ -171,6 +171,88 @@ The runner is serial and does not use BLAS. Environment settings make the
 single-thread policy explicit; CPU and memory binding set placement. On other
 machines, inspect the topology and choose valid CPU and NUMA IDs.
 
+## Multicore efSearch sweep: four independent workers
+
+The current runner rejects `--threads > 1`. Use four single-threaded processes
+on four physical cores to measure concurrent search with independent index
+copies. This is process-level concurrency, not shared-index multithreading or
+parallel index construction; allow RAM for four loaded indexes and SHG scratch
+buffers. Merely binding one serial process to several CPUs does not parallelize it.
+
+Run after building the matched-parameter sweep indexes above. On this host,
+CPUs 2–5 are distinct cores on node 0; keep their SMT siblings 50–53 idle.
+Check topology on other hosts. Sweep `efSearch` through
+`20 24 32 48 64 96 128 192 256 512` for both algorithms and datasets.
+Datasets, algorithms, breadths, and repeats run sequentially; only the four
+workers within each repeat run concurrently. Each worker searches the full
+query set and writes separate files: 800 search processes total. Indexes are
+reused without rebuilding. Use a new readable run name for another sweep.
+
+All multicore sweep outputs, including per-query results, performance CSVs,
+layer averages, logs, and plots, stay under
+`experiments/profiling/observations/multicore/four_core_sweep/`.
+Each worker uses `<dataset>/<algorithm>/ef<value>/repeat<number>/cpu<number>/`.
+This directory is separate from the single-core `ef_search_sweep/` results
+and the earlier fixed-ef multicore run in `multicore/four_core_search/`.
+The command refuses to reuse an existing sweep directory.
+
+```bash
+(
+set -e
+scripts=experiments/profiling/scripts
+run_root="experiments/profiling/observations/multicore/four_core_sweep"
+# Refuse to append measurements to an existing sweep.
+mkdir "$run_root"
+for dataset in sift enron; do
+  for algorithm in hnsw shg; do
+    index_file="experiments/profiling/indexes/${dataset}/${dataset}_${algorithm}_sweep_M48_efc80_seed100.index"
+    for ef_search in 20 24 32 48 64 96 128 192 256 512; do
+      for repeat in 1 2 3 4 5; do
+        pids=()
+        for cpu in 2 3 4 5; do
+          out="${run_root}/${dataset}/${algorithm}/ef${ef_search}/repeat${repeat}/cpu${cpu}"
+          mkdir -p "$out"
+          OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+            numactl --physcpubind="$cpu" --membind=0 \
+            python3 "$scripts/profile_${algorithm}_query.py" \
+            --dataset "$dataset" --M 48 --ef-construction 80 \
+            --k 20 --ef-search "$ef_search" --threads 1 --warmup 500 \
+            --index-file "$index_file" \
+            --output "$out/layer_stats.csv" \
+            --performance-output "$out/performance.csv" \
+            --layer-averages-output "$out/layer_averages.csv" \
+            > "$out/run.log" 2>&1 &
+          pids+=("$!")
+        done
+        failed=0
+        for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+        [ "$failed" -eq 0 ] || exit 1
+      done
+    done
+  done
+done
+echo "Multicore observations: $run_root"
+)
+```
+
+Report per-worker latency and QPS with spread across five repeats. Timed
+passes are not synchronized, so summing worker QPS is not a rigorous aggregate
+throughput measurement. A synchronized, shared-index multithread benchmark
+requires runner changes and thread-local SHG search scratch.
+
+Generate PNG/SVG plots (no PDFs) and a summary CSV in `plots/` under the run
+directory. These match the shortcut-enabled sweep's four plot types: recall
+versus latency, hops per layer, distances per layer, and SHG all-layer traversal
+fraction. The recall–latency curve averages all 20 worker measurements at
+each efSearch value; layer and traversal plots use efSearch=64. Compare
+algorithms at matched recall. The plotter validates all ten breadths, five
+repeats, and four workers before plotting the sweep.
+
+```bash
+python3 experiments/profiling/scripts/plot_multicore.py \
+  experiments/profiling/observations/multicore/four_core_sweep
+```
+
 ## Comparing measurements
 
 - Keep machine, compiler options, dataset, insertion/query order, seed, and
@@ -280,8 +362,14 @@ Matching M, seed, order, and ef does not guarantee identical graphs because
 construction distances can differ. The benchmark compares complete native
 implementations.
 
-SHG here differs from upstream: shortcut search uses `max(ef_, k)` at the
-base layer; density excludes unused capacity; each search clears touched
+SHG shortcut search uses `max(efSearch, k)` as its base-layer breadth so the
+sweep controls search effort. The released SHG code passes `k` instead;
+our efSearch behavior is a modification, not an exact reproduction.
+The `shortcuts_enabled` and `multicore/four_core_sweep` runs use the modified
+breadth. The `restored_k` run records the released k-only breadth and remains
+separate. Use fresh output directories for new measurements.
+
+SHG here still differs from upstream: density excludes unused capacity; each search clears touched
 scratch entries; `.index.shg` saves representations and shortcuts; and HEDS
 ordinary HNSW search no longer prints an entry-point line. Other SHG formulas
 and pruning remain. Base screening needs dimension at least 64; both supplied

@@ -6,10 +6,11 @@ these runs. This does not yet reproduce the paper's performance claims.
 
 ## Problems found
 
-- **Shortcuts are disabled in our runs.** The saved shortcut tables contain
+- **Shortcuts were disabled in the recorded runs.** The saved shortcut tables contain
   58 entries for SIFT1M and 13 for Enron. `hnswlib/heds.h` disables shortcut
-  lookup below 100 entries. Statistics show zero skipped levels throughout
-  the sweep.
+  lookup only for empty tables now; the previous barrier was 100 entries.
+  Statistics show zero skipped levels throughout the recorded sweep, which
+  predates this change. The sweep needs rerunning to measure its effect.
 - **Screening adds substantial work.** At efSearch=64, SHG performs about
   1,302 compressed distance checks per SIFT query and 990 per Enron query at
   the base layer, while doing roughly as many full distance calculations as
@@ -32,8 +33,9 @@ these runs. This does not yet reproduce the paper's performance claims.
   creates an HEDS object, inserts base data only for `"heds"`, and always
   calls shortcut search. Passing `"hnsw"` does not select a working vanilla
   HNSW benchmark there.
-- Our SHG base search honors `max(efSearch, k)`; upstream passes k. The sweep
-  therefore changes upstream search behavior.
+- SHG base search uses `max(efSearch, k)` again to make efSearch control
+  search breadth. The released implementation passes `k`; measurements of
+  that behavior are preserved separately in the `restored_k` run.
 - Our runner saves/loads SHG representations and shortcuts and resets touched
   scratch entries inside each search. The original example builds in memory
   and clears the entire scratch buffer outside its per-query timer.
